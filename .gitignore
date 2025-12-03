@@ -128,5 +128,51 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-.idea/outputs-rm-qwen-v1/
-outputs-rm-qwen-v1/
+# IDE
+.idea/
+.vscode/
+
+# Machine Learning / Deep Learning
+# Training outputs and checkpoints
+outputs*/
+checkpoints/
+logs/
+runs/
+wandb/
+tensorboard/
+*.log
+
+# Model files (usually too large for Git)
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.onnx
+*.pb
+*.tflite
+*.pkl
+*.pickle
+*.hdf5
+*.h5
+
+# Optimizer and scheduler states
+optimizer.pt
+scheduler.pt
+rng_state.pth
+training_args.bin
+
+# Large data files (uncomment if you don't want to track data)
+# data/
+# datasets/
+
+# Jupyter Notebook outputs
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
