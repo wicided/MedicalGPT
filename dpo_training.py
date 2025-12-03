@@ -10,7 +10,7 @@ from glob import glob
 from typing import Dict, Optional
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets, Features, Value, Sequence
 from loguru import logger
 from peft import LoraConfig, TaskType
 from transformers import (
@@ -25,6 +25,14 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 from trl import DPOTrainer, DPOConfig
 
 from template import get_conv_template
+
+is_flash_attn_2_available = False
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import pad_input, unpad_input
+    is_flash_attn_2_available = True
+except ImportError:
+    is_flash_attn_2_available = False
 
 os.environ["TOKENIZERS_PARALLELISM"] = "FALSE"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -129,7 +137,7 @@ class ScriptArguments:
     lr_scheduler_type: Optional[str] = field(default="cosine", metadata={"help": "The lr scheduler type"})
     warmup_steps: Optional[int] = field(default=100, metadata={"help": "The number of warmup steps"})
     weight_decay: Optional[float] = field(default=0.05, metadata={"help": "The weight decay"})
-    optim: Optional[str] = field(default="adamw_hf", metadata={"help": "The optimizer type"})
+    optim: Optional[str] = field(default="adamw_torch", metadata={"help": "The optimizer type"})
     fp16: Optional[bool] = field(default=True, metadata={"help": "Whether to use fp16"})
     bf16: Optional[bool] = field(default=False, metadata={"help": "Whether to use bf16"})
     gradient_checkpointing: Optional[bool] = field(
@@ -149,6 +157,10 @@ class ScriptArguments:
         metadata={"help": "Remove unused columns from the dataset if `datasets.Dataset` is used"},
     )
     report_to: Optional[str] = field(default="tensorboard", metadata={"help": "Report to wandb or tensorboard"})
+    flash_attn: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Enable FlashAttention-2 for faster training."}
+    )
 
     def __post_init__(self):
         if self.model_name_or_path is None:
@@ -246,36 +258,99 @@ def main():
                 cache_dir=args.cache_dir,
             )
     else:
-        data_files = {}
+        # Load files separately to avoid type conflicts, then merge
+        # Some files have history as [], others have [["q", "a"]]
+        train_data_files = []
+        eval_data_files = []
         if args.train_file_dir is not None and os.path.exists(args.train_file_dir):
             train_data_files = glob(f'{args.train_file_dir}/**/*.json', recursive=True) + glob(
                 f'{args.train_file_dir}/**/*.jsonl', recursive=True)
             logger.info(f"train files: {', '.join(train_data_files)}")
-            data_files["train"] = train_data_files
         if args.validation_file_dir is not None and os.path.exists(args.validation_file_dir):
             eval_data_files = glob(f'{args.validation_file_dir}/**/*.json', recursive=True) + glob(
                 f'{args.validation_file_dir}/**/*.jsonl', recursive=True)
             logger.info(f"eval files: {', '.join(eval_data_files)}")
-            data_files["validation"] = eval_data_files
-        raw_datasets = load_dataset(
-            'json',
-            data_files=data_files,
-            cache_dir=args.cache_dir,
-        )
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[:{args.validation_split_percentage}%]",
-                cache_dir=args.cache_dir,
+        
+        # Load each file separately and normalize history field
+        def normalize_history_in_dataset(dataset):
+            """Normalize history field to ensure consistent format."""
+            def normalize_batch(examples):
+                normalized_history = []
+                for history in examples["history"]:
+                    # Ensure history is always a nested list format [[q, a], ...]
+                    if history is None:
+                        normalized_history.append([])
+                    elif isinstance(history, list):
+                        # Check if it's already nested list format [["q", "a"]]
+                        if len(history) > 0 and isinstance(history[0], list):
+                            normalized_history.append(history)
+                        else:
+                            # Empty list or single-level list, convert to nested format
+                            normalized_history.append([])
+                    else:
+                        normalized_history.append([])
+                return {"history": normalized_history}
+            
+            if "history" in dataset.column_names:
+                dataset = dataset.map(
+                    normalize_batch,
+                    batched=True,
+                    desc="Normalizing history field",
+                )
+                # Cast history column to unified type: List(List(Value('string')))
+                # This ensures all datasets have the same feature type for merging
+                unified_features = Features({
+                    **dataset.features,
+                    "history": Sequence(Sequence(Value("string")))
+                })
+                dataset = dataset.cast(unified_features)
+            return dataset
+        
+        # Load train datasets
+        train_datasets = []
+        if train_data_files:
+            for file_path in train_data_files:
+                try:
+                    ds = load_dataset('json', data_files=file_path, cache_dir=args.cache_dir)
+                    if "train" in ds:
+                        ds_normalized = normalize_history_in_dataset(ds["train"])
+                        train_datasets.append(ds_normalized)
+                except Exception as e:
+                    logger.warning(f"Failed to load {file_path}: {e}")
+        
+        # Load eval datasets
+        eval_datasets = []
+        if eval_data_files:
+            for file_path in eval_data_files:
+                try:
+                    ds = load_dataset('json', data_files=file_path, cache_dir=args.cache_dir)
+                    if "train" in ds:
+                        ds_normalized = normalize_history_in_dataset(ds["train"])
+                        eval_datasets.append(ds_normalized)
+                except Exception as e:
+                    logger.warning(f"Failed to load {file_path}: {e}")
+        
+        # Merge datasets
+        raw_datasets = {}
+        if train_datasets:
+            if len(train_datasets) > 1:
+                raw_datasets["train"] = concatenate_datasets(train_datasets)
+            else:
+                raw_datasets["train"] = train_datasets[0]
+        
+        if eval_datasets:
+            if len(eval_datasets) > 1:
+                raw_datasets["validation"] = concatenate_datasets(eval_datasets)
+            else:
+                raw_datasets["validation"] = eval_datasets[0]
+        elif "train" in raw_datasets:
+            # If no validation data, split train data
+            split_dataset = raw_datasets["train"].train_test_split(
+                test_size=args.validation_split_percentage / 100.0
             )
-            raw_datasets["train"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[{args.validation_split_percentage}%:]",
-                cache_dir=args.cache_dir,
-            )
+            raw_datasets["train"] = split_dataset["train"]
+            raw_datasets["validation"] = split_dataset["test"]
+    
     logger.info(f"Raw datasets: {raw_datasets}")
 
     # Preprocessing the datasets
@@ -297,14 +372,34 @@ def main():
           system_prompt + history[[q,a], [q,a]...] + question
         """
         prompts = []
-        for system, history, question in zip(examples["system"], examples["history"], examples["question"]):
-            system_prompt = system or ""
+        # Ensure all inputs are properly formatted
+        system_list = examples.get("system", [""] * len(examples["question"]))
+        history_list = examples.get("history", [[]] * len(examples["question"]))
+        question_list = examples["question"]
+        
+        for system, history, question in zip(system_list, history_list, question_list):
+            # Ensure system is a string
+            system_prompt = str(system) if system else ""
+            
+            # Ensure history is a list (handle None or other types)
+            if history is None or not isinstance(history, list):
+                history = []
+            
+            # Ensure question is a string
+            question = str(question) if question else ""
+            
+            # Build history with question
             history_with_question = history + [[question, '']] if history else [[question, '']]
             prompts.append(prompt_template.get_prompt(messages=history_with_question, system_prompt=system_prompt))
+        
+        # Ensure chosen and rejected are strings
+        chosen_list = [str(r) if r else "" for r in examples["response_chosen"]]
+        rejected_list = [str(r) if r else "" for r in examples["response_rejected"]]
+        
         return {
             "prompt": prompts,
-            "chosen": examples["response_chosen"],
-            "rejected": examples["response_rejected"],
+            "chosen": chosen_list,
+            "rejected": rejected_list,
         }
 
     # Preprocess the dataset
@@ -387,6 +482,17 @@ def main():
         torch_dtype=torch_dtype,
         cache_dir=args.cache_dir
     )
+    
+    # Set FlashAttention-2
+    model_kwargs = {}
+    if args.flash_attn:
+        if is_flash_attn_2_available:
+            model_kwargs["use_flash_attention_2"] = True
+            logger.info("Using FlashAttention-2 for faster training and inference.")
+        else:
+            logger.warning("FlashAttention-2 is not installed. Please install it with: pip install flash-attn --no-build-isolation")
+            logger.warning("Training will use standard attention.")
+    
     if args.load_in_4bit or args.load_in_8bit:
         logger.info(f"Quantizing model, load_in_4bit: {args.load_in_4bit}, load_in_8bit: {args.load_in_8bit}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -396,6 +502,7 @@ def main():
         low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
         device_map=args.device_map,
         trust_remote_code=args.trust_remote_code,
+        **model_kwargs,
         quantization_config=BitsAndBytesConfig(
             load_in_4bit=args.load_in_4bit,
             load_in_8bit=args.load_in_8bit,
@@ -405,6 +512,23 @@ def main():
         ) if args.qlora else None,
     )
     # fixed FP16 ValueError
+    # Load existing PEFT/LoRA weights if specified
+    if args.peft_path and os.path.exists(args.peft_path):
+        from peft import PeftModel
+        logger.info(f"Loading existing PEFT model from {args.peft_path}")
+        try:
+            model = PeftModel.from_pretrained(model, args.peft_path)
+            # Ensure adapter is in train mode for DPO training
+            model.train()
+            for name, param in model.named_parameters():
+                if 'lora' in name.lower():
+                    param.requires_grad = True
+            logger.info("✓ Successfully loaded existing LoRA weights from SFT checkpoint")
+            print_trainable_parameters(model)
+        except Exception as e:
+            logger.warning(f"Failed to load PEFT from {args.peft_path}: {e}")
+            logger.info("Continuing with base model (new LoRA will be initialized)")
+
     for param in filter(lambda p: p.requires_grad, model.parameters()):
         param.data = param.data.to(torch.float32)
 
@@ -441,20 +565,29 @@ def main():
 
     # Initialize DPO trainer
     peft_config = None
+    # Check if model already has PEFT/LoRA adapter loaded
+    has_peft_adapter = hasattr(model, 'peft_config') and len(model.peft_config) > 0
+    
     if args.use_peft:
-        logger.info("Fine-tuning method: LoRA(PEFT)")
-        target_modules = args.target_modules.split(',') if args.target_modules else None
-        if target_modules and 'all' in target_modules:
-            target_modules = find_all_linear_names(model, int4=args.load_in_4bit, int8=args.load_in_8bit)
-        logger.info(f"Peft target_modules: {target_modules}")
-        peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            target_modules=target_modules,
-            inference_mode=False,
-            r=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-        )
+        if has_peft_adapter:
+            logger.info("Fine-tuning method: LoRA(PEFT) - Continuing training with existing adapter")
+            # If PEFT adapter is already loaded, we don't need to create a new config
+            # The trainer will use the existing adapter configuration
+            peft_config = None
+        else:
+            logger.info("Fine-tuning method: LoRA(PEFT) - Initializing new adapter")
+            target_modules = args.target_modules.split(',') if args.target_modules else None
+            if target_modules and 'all' in target_modules:
+                target_modules = find_all_linear_names(model, int4=args.load_in_4bit, int8=args.load_in_8bit)
+            logger.info(f"Peft target_modules: {target_modules}")
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                target_modules=target_modules,
+                inference_mode=False,
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+            )
     else:
         logger.info("Fine-tuning method: Full parameters training")
     trainer = DPOTrainer(

@@ -1,26 +1,29 @@
-CUDA_VISIBLE_DEVICES=0,1 python dpo_training.py \
-    --model_name_or_path Qwen/Qwen2.5-0.5B-Instruct \
+CUDA_VISIBLE_DEVICES=0 python dpo_training.py \
+    --model_name_or_path /root/autodl-tmp/models/Qwen2.5-7B-Instruct/qwen/Qwen2___5-7B-Instruct \
+    --tokenizer_name_or_path /root/autodl-tmp/models/Qwen2.5-7B-Instruct/qwen/Qwen2___5-7B-Instruct \
+    --peft_path /root/autodl-tmp/outputs-sft-medical-qwen-7b/checkpoint-1876 \
     --template_name qwen \
-    --train_file_dir ./data/reward \
-    --validation_file_dir ./data/reward \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 8 \
+    --train_file_dir /root/autodl-tmp/data/reward \
+    --validation_file_dir /root/autodl-tmp/data/reward \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 16 \
     --per_device_eval_batch_size 1 \
     --do_train \
     --do_eval \
     --use_peft True \
-    --max_train_samples 1000 \
-    --max_eval_samples 10 \
-    --max_steps 100 \
-    --eval_steps 20 \
-    --save_steps 50 \
-    --max_source_length 1024 \
-    --max_target_length 512 \
-    --output_dir outputs-dpo-qwen-v1 \
+    --max_train_samples 6000 \
+    --max_eval_samples 300 \
+    --max_steps 250 \
+    --eval_steps 50 \
+    --save_steps 100 \
+    --max_source_length 512 \
+    --max_target_length 256 \
+    --output_dir /root/autodl-tmp/outputs-dpo-medical-qwen-7b \
     --target_modules all \
-    --lora_rank 8 \
-    --lora_alpha 16 \
+    --lora_rank 16 \
+    --lora_alpha 32 \
     --lora_dropout 0.05 \
+    --learning_rate 2e-4 \
     --torch_dtype bfloat16 \
     --bf16 True \
     --fp16 False \
@@ -28,4 +31,5 @@ CUDA_VISIBLE_DEVICES=0,1 python dpo_training.py \
     --report_to tensorboard \
     --remove_unused_columns False \
     --gradient_checkpointing True \
-    --cache_dir ./cache
+    --flash_attn True \
+    --cache_dir /root/autodl-tmp/cache

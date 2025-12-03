@@ -249,6 +249,11 @@ class RewardTrainer(Trainer):
         }
         outputs_chosen = model(**inputs_chosen)
         rewards_chosen = outputs_chosen.logits.detach()
+        
+        # Clear cache between chosen and rejected to save memory
+        del outputs_chosen
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         inputs_rejected = {
             "input_ids": inputs["input_ids_rejected"].to(device),
@@ -256,6 +261,11 @@ class RewardTrainer(Trainer):
         }
         outputs_rejected = model(**inputs_rejected)
         rewards_rejected = outputs_rejected.logits.detach()
+        
+        # Clear cache after rejected
+        del outputs_rejected
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Keep the compute_loss method
         loss = -torch.nn.functional.logsigmoid(rewards_chosen - rewards_rejected).mean()
@@ -463,25 +473,56 @@ def main():
                 f'{data_args.validation_file_dir}/**/*.jsonl', recursive=True)
             logger.info(f"eval files: {', '.join(eval_data_files)}")
             data_files["validation"] = eval_data_files
-        raw_datasets = load_dataset(
-            'json',
-            data_files=data_files,
-            cache_dir=model_args.cache_dir,
-        )
+        # Load dataset - handle type inconsistencies by loading manually
+        from datasets import Dataset
+        import json
+        all_train_data = []
+        all_eval_data = []
+        
+        # Load training data
+        if "train" in data_files:
+            for file_path in data_files["train"]:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            data = json.loads(line)
+                            # Ensure all required fields exist and have correct types
+                            if 'history' not in data or data['history'] is None:
+                                data['history'] = []
+                            if 'system' not in data:
+                                data['system'] = ""
+                            all_train_data.append(data)
+        
+        # Load validation data
+        if "validation" in data_files:
+            for file_path in data_files["validation"]:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            data = json.loads(line)
+                            # Ensure all required fields exist and have correct types
+                            if 'history' not in data or data['history'] is None:
+                                data['history'] = []
+                            if 'system' not in data:
+                                data['system'] = ""
+                            all_eval_data.append(data)
+        
+        # Create datasets
+        raw_datasets = {}
+        if all_train_data:
+            raw_datasets["train"] = Dataset.from_list(all_train_data)
+        if all_eval_data:
+            raw_datasets["validation"] = Dataset.from_list(all_eval_data)
+        
         # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
+        if "validation" not in raw_datasets.keys() and "train" in raw_datasets.keys():
+            split_idx = int(len(raw_datasets["train"]) * (1 - data_args.validation_split_percentage / 100))
+            split_datasets = raw_datasets["train"].train_test_split(
+                test_size=len(raw_datasets["train"]) - split_idx, 
+                seed=42
             )
-            raw_datasets["train"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-            )
+            raw_datasets["train"] = split_datasets["train"]
+            raw_datasets["validation"] = split_datasets["test"]
     logger.info(f"Raw datasets: {raw_datasets}")
 
     # Preprocessing the datasets
@@ -623,6 +664,9 @@ def main():
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
+        # Clear GPU cache before evaluation to prevent OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         metrics = trainer.evaluate()
 
         metrics["eval_samples"] = max_eval_samples

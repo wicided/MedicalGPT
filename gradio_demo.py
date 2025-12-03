@@ -116,7 +116,7 @@ def main():
     gr.ChatInterface(
         predict,
         chatbot=gr.Chatbot(),
-        textbox=gr.Textbox(placeholder="Ask me question", lines=4, scale=9),
+        textbox=gr.Textbox(placeholder="Ask me question", lines=1, scale=9),
         title="MedicalGPT",
         description="为了促进医疗行业大模型的开放研究，本项目开源了[MedicalGPT](https://github.com/shibing624/MedicalGPT)医疗大模型",
         theme="soft",

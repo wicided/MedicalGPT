@@ -3,12 +3,10 @@
 @author:XuMing(xuming624@qq.com)
 @description: 
 """
-
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Sequence
 
 __all__ = ['Conversation', 'register_conv_template', 'get_conv_template']
-
 
 @dataclass
 class Conversation:
@@ -547,7 +545,6 @@ register_conv_template(
     )
 )
 
-
 register_conv_template(
     Conversation(
         name="deepseek",
@@ -561,7 +558,6 @@ register_conv_template(
         sep="</s>",
     )
 )
-
 
 def get_conv_template(name: str) -> Conversation:
     """Get a conversation template."""

@@ -445,37 +445,63 @@ def main():
         roles = ["human", "gpt"]
 
         def get_dialog(examples):
-            system_prompts = examples.get("system_prompt", "")
-            for i, source in enumerate(examples['conversations']):
-                system_prompt = ""
-                if len(source) < 2:
-                    continue
-                data_role = source[0].get("from", "")
-                if data_role == "system":
-                    # Skip the first one if it is from system
-                    system_prompt = source[0]["value"]
-                    source = source[1:]
+            # Check if data is in Alpaca format (instruction/input/output)
+            if 'instruction' in examples and len(examples['instruction']) > 0:
+                # Alpaca format
+                system_prompts = examples.get("system_prompt", "")
+                instructions = examples.get("instruction", [])
+                inputs = examples.get("input", [])
+                outputs = examples.get("output", [])
+                
+                for i in range(len(instructions)):
+                    instruction = instructions[i] if i < len(instructions) else ""
+                    input_text = inputs[i] if i < len(inputs) and inputs[i] else ""
+                    output = outputs[i] if i < len(outputs) else ""
+                    
+                    if not instruction or not output:
+                        continue
+                    
+                    # Build question: if input exists, combine instruction and input
+                    if input_text and input_text.strip():
+                        question = f"{instruction}\n\n{input_text}"
+                    else:
+                        question = instruction
+                    
+                    system_prompt = system_prompts[i] if isinstance(system_prompts, list) and i < len(system_prompts) else (system_prompts if isinstance(system_prompts, str) else "")
+                    yield prompt_template.get_dialog([[question, output]], system_prompt=system_prompt)
+            else:
+                # ShareGPT format (conversations)
+                system_prompts = examples.get("system_prompt", "")
+                for i, source in enumerate(examples['conversations']):
+                    system_prompt = ""
+                    if len(source) < 2:
+                        continue
                     data_role = source[0].get("from", "")
-                if data_role not in roles or data_role != roles[0]:
-                    # Skip the first one if it is not from human
-                    source = source[1:]
-                if len(source) < 2:
-                    continue
-                messages = []
-                for j, sentence in enumerate(source):
-                    data_role = sentence.get("from", "")
-                    if data_role not in roles:
-                        logger.warning(f"unknown role: {data_role}, {i}. (ignored)")
-                        break
-                    if data_role == roles[j % 2]:
-                        messages.append(sentence["value"])
-                if len(messages) % 2 != 0:
-                    continue
-                # Convert the list to pairs of elements
-                history_messages = [[messages[k], messages[k + 1]] for k in range(0, len(messages), 2)]
-                if not system_prompt:
-                    system_prompt = system_prompts[i] if system_prompts else ""
-                yield prompt_template.get_dialog(history_messages, system_prompt=system_prompt)
+                    if data_role == "system":
+                        # Skip the first one if it is from system
+                        system_prompt = source[0]["value"]
+                        source = source[1:]
+                        data_role = source[0].get("from", "")
+                    if data_role not in roles or data_role != roles[0]:
+                        # Skip the first one if it is not from human
+                        source = source[1:]
+                    if len(source) < 2:
+                        continue
+                    messages = []
+                    for j, sentence in enumerate(source):
+                        data_role = sentence.get("from", "")
+                        if data_role not in roles:
+                            logger.warning(f"unknown role: {data_role}, {i}. (ignored)")
+                            break
+                        if data_role == roles[j % 2]:
+                            messages.append(sentence["value"])
+                    if len(messages) % 2 != 0:
+                        continue
+                    # Convert the list to pairs of elements
+                    history_messages = [[messages[k], messages[k + 1]] for k in range(0, len(messages), 2)]
+                    if not system_prompt:
+                        system_prompt = system_prompts[i] if system_prompts else ""
+                    yield prompt_template.get_dialog(history_messages, system_prompt=system_prompt)
 
         for dialog in get_dialog(examples):
             input_ids, labels = [], []

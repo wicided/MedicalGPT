@@ -1,11 +1,11 @@
 # reward model 训练暂不支持 torchrun 多卡训练
 CUDA_VISIBLE_DEVICES=0,1 python reward_modeling.py \
-    --model_name_or_path Qwen/Qwen2.5-0.5B-Instruct \
-    --train_file_dir ./data/reward \
-    --validation_file_dir ./data/reward \
+    --model_name_or_path /root/autodl-tmp/models/Qwen2.5-7B-Instruct \
+    --train_file_dir /root/autodl-tmp/data/reward \
+    --validation_file_dir /root/autodl-tmp/data/reward \
     --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 8 \
-    --per_device_eval_batch_size 4 \
+    --per_device_eval_batch_size 1 \
     --do_train \
     --use_peft True \
     --seed 42 \

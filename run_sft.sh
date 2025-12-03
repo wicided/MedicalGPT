@@ -1,41 +1,42 @@
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 supervised_finetuning.py \
-    --model_name_or_path Qwen/Qwen2.5-0.5B-Instruct \
-    --train_file_dir ./data/finetune \
-    --validation_file_dir ./data/finetune \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
+CUDA_VISIBLE_DEVICES=0 python supervised_finetuning.py \
+    --model_name_or_path /root/autodl-tmp/models/Qwen2.5-7B-Instruct/qwen/Qwen2___5-7B-Instruct \
+    --train_file_dir /root/autodl-tmp/data/pretrain/medical/finetune \
+    --validation_file_dir /root/autodl-tmp/data/pretrain/medical/finetune \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
     --do_train \
     --do_eval \
     --template_name qwen \
     --use_peft True \
-    --max_train_samples 1000 \
-    --max_eval_samples 10 \
-    --model_max_length 4096 \
-    --num_train_epochs 1 \
+    --max_train_samples 15000 \
+    --max_eval_samples 1000 \
+    --model_max_length 2048 \
+    --num_train_epochs 2 \
     --learning_rate 2e-5 \
-    --warmup_ratio 0.05 \
-    --weight_decay 0.05 \
+    --warmup_ratio 0.1 \
+    --weight_decay 0.01 \
     --logging_strategy steps \
-    --logging_steps 10 \
-    --eval_steps 50 \
+    --logging_steps 50 \
+    --eval_steps 1000 \
     --eval_strategy steps \
-    --save_steps 500 \
+    --save_steps 5000 \
     --save_strategy steps \
-    --save_total_limit 13 \
+    --save_total_limit 5 \
     --gradient_accumulation_steps 8 \
-    --preprocessing_num_workers 4 \
-    --output_dir outputs-sft-qwen-v1 \
+    --dataloader_num_workers 4 \
+    --dataloader_pin_memory True \
+    --preprocessing_num_workers 8 \
+    --output_dir /root/autodl-tmp/outputs-sft-medical-qwen-7b \
     --overwrite_output_dir \
-    --ddp_timeout 30000 \
     --logging_first_step True \
     --target_modules all \
-    --lora_rank 8 \
-    --lora_alpha 16 \
+    --lora_rank 16 \
+    --lora_alpha 32 \
     --lora_dropout 0.05 \
     --torch_dtype bfloat16 \
     --bf16 \
     --device_map auto \
     --report_to tensorboard \
-    --ddp_find_unused_parameters False \
     --gradient_checkpointing True \
-    --cache_dir ./cache --flash_attn True
+    --cache_dir /root/autodl-tmp/cache \
+    --flash_attn True
